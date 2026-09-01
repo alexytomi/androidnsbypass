@@ -91,7 +91,8 @@ typedef struct {
 
 static private_dl_funcs s_privateDlFuncs = {0};
 static private_namespace_funcs s_linkerFuncs = {0};
-struct android_namespace_t* escapeNs;
+static char* s_native_lib_dir = NULL;
+static struct android_namespace_t* escapeNs;
 
 // Aligns pointer to page size so mprotect properly gets the whole page
 inline static void *align_ptr_to_pagesize(void *ptr) {
@@ -468,14 +469,7 @@ bool test_namespace_funcs(private_namespace_funcs nsFuncs)
     }
 
     LOGI("Attempting to create escape namespace");
-    escapeNs = nsFuncs.create_namespace(
-            "g_default_namespace_copy",
-            NULL,
-            SYSTEM_LIBS_PATH,
-            ANDROID_NAMESPACE_TYPE_SHARED,
-            SYSTEM_LIBS_PATH,
-            NULL,
-            &dlopen); // This address is libdl.so, which should resolve to g_default_namespace
+    escapeNs = get_escape_namespace(nsFuncs); // This address is libdl.so, which should resolve to g_default_namespace
     if (escapeNs) {
         LOGI("android_create_namespace successfully made escapeNs");
     } else {
@@ -532,7 +526,7 @@ __attribute__((constructor)) static void resolve_global_symbols()
              "non-functional. nsbypass_dlfcn will redirect to the real public API.");
         return;
     }
-    // NOTE: Tests are fast enough for release actually, but I'll disable them anyway.
+    // WARNING: Tests call get_escape_namespace()!
     s_privateDlFuncs = get_private_dl_functions();
     test_dlfuncs(s_privateDlFuncs);
     s_linkerFuncs = get_private_namespace_functions(s_privateDlFuncs);
@@ -545,32 +539,7 @@ __attribute__((constructor)) static void resolve_global_symbols()
         LOGE("Failed to resolve Android linker namespace functions! Cannot run nsbypass.");
         exit(121);
     }
-    // Create if not yet made, which is the case if tests are disabled
-    if (!escapeNs){
-        escapeNs = s_linkerFuncs.create_namespace(
-                "g_default_namespace_copy",
-                NULL,
-                SYSTEM_LIBS_PATH,
-                ANDROID_NAMESPACE_TYPE_SHARED,
-                SYSTEM_LIBS_PATH,
-                NULL,
-                &dlopen);
-        if (!escapeNs) {
-            LOGD("Failed to create escapeNs!");
-            exit(122); // idk it felt like a 120
-        }
-    }
 }
-
-/*
-  Note:
-    You may have found that escapeNs does not have search paths within your app native dir and thus
-    cannot properly resolve any NEEDED's from there. Make your own namespace. I suggest creating
-    a SHARED ns with parent escapeNs. Simply add your nativeLibraryDir to default_library_path and
-    it will be appended to the list that it will search for NEEDEDs!
-
-    or yknow, preload them. dlopen them before the lib that needs them, assuming its not isolated.
- */
 
 // dlopen in a specific namespace
 void* linker_ns_dlopen(
@@ -722,5 +691,127 @@ void* private_dlsym(
             caller_addr);
 }
 
+struct android_namespace_t* get_escape_namespace() {
+    if (!s_linkerFuncs.create_namespace)
+        return NULL;
 
+#ifdef FORCE_ESCAPENS_ACCESS_TO_APPNATIVEDIR
+    if (!s_native_lib_dir)
+        return NULL;
+#endif
 
+    const char *search_path = SYSTEM_LIBS_PATH;
+    char *allocated_path = NULL;
+
+    if (s_native_lib_dir) {
+        // Don't assume Android's paths are always sane.
+        const size_t system_libs_len = strlen(SYSTEM_LIBS_PATH);
+        const size_t native_lib_len = strlen(s_native_lib_dir);
+        const size_t total_len = system_libs_len + native_lib_len + 2;
+
+        allocated_path = malloc(total_len);
+        if (allocated_path) {
+            snprintf(
+                    allocated_path,
+                    total_len,
+                    "%s:%s",
+                    SYSTEM_LIBS_PATH,
+                    s_native_lib_dir
+            );
+
+            search_path = allocated_path;
+        }
+    }
+
+    struct android_namespace_t *result = s_linkerFuncs.create_namespace(
+            "g_default_namespace_copy",
+            NULL,
+            search_path,
+            ANDROID_NAMESPACE_TYPE_SHARED,
+            search_path,
+            NULL,
+            &dlopen
+    );
+
+    free(allocated_path);
+    return result;
+}
+
+bool set_native_library_dir(const char* native_dir) {
+    if (!native_dir) {
+        free(s_native_lib_dir);
+        s_native_lib_dir = NULL;
+        return true;
+    }
+
+    char *copy = malloc(strlen(native_dir) + 1);
+    if (!copy)
+        return false;
+
+    strcpy(copy, native_dir);
+
+    free(s_native_lib_dir);
+    s_native_lib_dir = copy;
+    return true;
+}
+
+/**
+ * Utterly disgusting way to get the nativeLibraryDir for escapeNs
+ */
+jint JNI_OnLoad(JavaVM *vm, void *reserved) {
+    JNIEnv *env = NULL;
+    if ((*vm)->GetEnv(vm, (void**)&env, JNI_VERSION_1_4) != JNI_OK) {
+        return JNI_ERR;
+    }
+
+    jclass activity_thread_class = (*env)->FindClass(env, "android/app/ActivityThread");
+    if (!activity_thread_class) goto cleanup;
+
+    jmethodID current_activity_thread_method = (*env)->GetStaticMethodID(env, activity_thread_class,
+            "currentActivityThread", "()Landroid/app/ActivityThread;");
+    if (!current_activity_thread_method) goto cleanup;
+
+    jobject activity_thread = (*env)->CallStaticObjectMethod(env, activity_thread_class,
+            current_activity_thread_method);
+    if (!activity_thread) goto cleanup;
+
+    jmethodID get_application_method = (*env)->GetMethodID(env, activity_thread_class,
+            "getApplication", "()Landroid/app/Application;");
+    if (!get_application_method) goto cleanup;
+
+    jobject application = (*env)->CallObjectMethod(env, activity_thread, get_application_method);
+    if (!application) goto cleanup;
+
+    jclass context_class = (*env)->FindClass(env, "android/content/Context");
+    jmethodID get_application_info_method = (*env)->GetMethodID(env, context_class,
+            "getApplicationInfo", "()Landroid/content/pm/ApplicationInfo;");
+    if (!get_application_info_method) goto cleanup;
+
+    jobject application_info = (*env)->CallObjectMethod(env, application,
+            get_application_info_method);
+    if (!application_info) goto cleanup;
+
+    jclass application_info_class = (*env)->FindClass(env, "android/content/pm/ApplicationInfo");
+
+    jfieldID native_library_dir_jfield = (*env)->GetFieldID(env, application_info_class,
+            "nativeLibraryDir", "Ljava/lang/String;");
+    if (!native_library_dir_jfield) goto cleanup;
+
+    jstring native_library_dir_jstring = (jstring)(*env)->GetObjectField(env, application_info,
+            native_library_dir_jfield);
+    if (!native_library_dir_jstring) goto cleanup;
+
+    const char *native_library_dir = (*env)->GetStringUTFChars(env, native_library_dir_jstring,
+            NULL);
+    if (native_library_dir) {
+        s_native_lib_dir = malloc(strlen(native_library_dir) + 1);
+        if (s_native_lib_dir) {
+            strcpy(s_native_lib_dir, native_library_dir);
+        }
+        (*env)->ReleaseStringUTFChars(env, native_library_dir_jstring, native_library_dir);
+    }
+
+    cleanup:
+    (*env)->ExceptionClear(env);
+    return JNI_VERSION_1_4;
+}

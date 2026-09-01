@@ -18,7 +18,7 @@ extern "C" {
 #endif
 
 bool linkernsbypass_load_status() {
-    return escapeNs;
+    return get_escape_namespace();
 }
 
 struct android_namespace_t *android_create_namespace(const char *name,

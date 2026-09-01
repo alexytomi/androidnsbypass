@@ -6,9 +6,13 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(ENABLE_TESTS "Enable tests at runtime. Exits the process if any of the functions are gonna be non-functional." OFF)
+option(FORCE_ESCAPENS_ACCESS_TO_APPNATIVEDIR "Makes get_escape_namespace() return NULL until s_native_lib_dir is set.", OFF)
 
 if(ENABLE_TESTS)
     add_compile_definitions(ENABLE_TESTS)
+endif()
+if(FORCE_ESCAPENS_ACCESS_TO_APPNATIVEDIR)
+    add_compile_definitions(FORCE_ESCAPENS_ACCESS_TO_APPNATIVEDIR)
 endif()
 
 add_library(${CMAKE_PROJECT_NAME} SHARED

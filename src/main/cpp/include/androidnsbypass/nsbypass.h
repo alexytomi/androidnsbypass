@@ -40,10 +40,20 @@ extern "C" {
 #define SYSTEM_LIBS_PATH "/system/:/system_ext/:/data/:/vendor/:/apex/"
 
 /**
- * A namespace that has access to SYSTEM_LIBS_PATH.
+ * Manually provide the native library for the application with which this library is running in.
+ * Typically simply loading the NativeLib class is enough as it calls JNI_OnLoad.
+ * @param native_dir ApplicationInfo.nativeLibraryDir
+ * @return If it was provided to the library successfully
+ */
+bool set_native_library_dir(const char* native_dir);
+
+/**
+ * A namespace that has access to SYSTEM_LIBS_PATH and nativeLibraryDir (your apps' native jniLibs).
+ * nativeLibraryDir will not be accessible if you did not use JNI to load this library and did not
+ * provide set_native_library_dir() the directory with which to search.
  * Fun fact: bylaws/liblinkernsbypass coined this term
  */
-extern struct android_namespace_t* escapeNs;
+struct android_namespace_t* get_escape_namespace();
 
 /**
  * @brief dlopen, but you can specify which namespace to open the library in.
