@@ -4,6 +4,9 @@ pluginManagement {
         mavenCentral()
         gradlePluginPortal()
     }
+    plugins {
+        id("com.android.library") version "9.3.2"
+    }
 }
 
 dependencyResolutionManagement {
