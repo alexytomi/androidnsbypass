@@ -244,6 +244,7 @@ private_dl_funcs get_private_dl_functions()
         // Yeah idk why normal dlsym works here, its insane bro
         if (resolve_dl_funcs(&dlFuncs, linkerHandle, false)) return dlFuncs;
         LOGW("Obtaining missing private API funcs from ld-android.so failed, trying libdl_android.so..");
+        linkerHandle = dlFuncs.dlopen("libdl_android.so", RTLD_LAZY, &dlsym);
         // Oh lets also try the other one for good fucking measure.
         if (resolve_dl_funcs(&dlFuncs, linkerHandle, false)) return dlFuncs;
     }
