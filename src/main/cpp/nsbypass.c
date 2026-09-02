@@ -594,7 +594,7 @@ void* linker_ns_dlopen_unique(
         struct android_namespace_t* ns)
 {
     if (is_android_6_or_lower()) return NULL;
-    if (!ns || !libPath || patchedLibDir) return NULL;
+    if (!ns || !libPath || !patchedLibDir) return NULL;
     char pathbuf[PATH_MAX];
     int patch_fd;
 
