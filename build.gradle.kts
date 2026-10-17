@@ -12,6 +12,7 @@ android {
 
     buildFeatures {
         prefabPublishing = true
+        prefab = true
     }
 
     defaultConfig {
@@ -51,4 +52,8 @@ android {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
+}
+
+dependencies {
+    implementation("io.github.hexhacking:xdl:2.4.0")
 }

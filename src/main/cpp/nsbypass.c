@@ -20,7 +20,7 @@
 #include <androidnsbypass/nsbypass.h>
 #include <androidnsbypass/nsbypass_t.h>
 
-#include "fasthook/nsbypass_dlfcn.h"
+#include "xdl.h"
 
 #include "elf_soname_patcher.h"
 #include "utils.h"
@@ -92,55 +92,12 @@ static private_dl_funcs s_privateDlFuncs = {0};
 static private_namespace_funcs s_linkerFuncs = {0};
 static struct android_namespace_t* escapeNs;
 
-// Aligns pointer to page size so mprotect properly gets the whole page
-inline static void *align_ptr_to_pagesize(void *ptr) {
-    return (void *)(((uintptr_t)ptr) & ~(getpagesize() - 1));
-}
-#if (defined __aarch64__)
-#include <sys/mman.h>
-
-// The logic of doing this stems from
-// https://cs.android.com/android/platform/superproject/+/329d792f6d5e33e8a6fc5a02809c795ce17774ab:bionic/libdl/libdl.cpp;drc=a493fe415304efd19f089cbfc7d78c9db7d7263c;l=86-114
-// Where the dl* functions all just call __loader variants
-
-// This is just coincidentally convenient for ARM64 opcodes.
-// The other arches don't find this approach very simple.
-
-/* upper 6 bits of an ARM64 instruction are the instruction name */
-#define OP_MS 0b11111100000000000000000000000000
-/* Branch Label instruction opcode and immediate mask */
-#define BL_OP 0b10010100000000000000000000000000
-#define BL_IM 0b00000011111111111111111111111111
-
-static void* find_branch_label(void* func_start) {
-    long page_size = sysconf(_SC_PAGESIZE);
-    // Some devices (MIUI) ship with --X mapping for executables so work around that
-    if (mprotect(align_ptr_to_pagesize(func_start), page_size, PROT_READ | PROT_EXEC)){
-        LOGW("Failed to set readable bit on provided func! This might fail..  %p", func_start);
-    }
-    uint32_t* bl_addr = func_start;
-    // Search for the "branch to label" opcode
-    while((*bl_addr & OP_MS) != BL_OP) {
-        bl_addr++; // walk through memory until we find it or die
-    }
-    // Offset the address to find where the "branch to label" instrunction
-    // points to.
-    void* t = ((char*)bl_addr) + (*bl_addr & BL_IM) * 4;
-    // Reprotecting the functions removes (BTI) protection from indirect jumps.
-    // While technically out of scope of "find_branch_label", this is just
-    // cleaner overall.
-    if (mprotect(align_ptr_to_pagesize(t), page_size, PROT_WRITE | PROT_READ | PROT_EXEC) != 0) {
-        LOGW("Failed to remove BTI protection from private API page. This might fail..  %p", t);
-    }
-    return t;
-}
-#endif
-
 static void *resolve_symbol(void *handle, const char *name, private_dl_funcs *funcs, bool prefer_private_api)
 {
     if (!handle) return NULL;
     dlerror(); // Clear any stale error.
     void *symbol = NULL;
+    // NOTE: There is an assumption that dlsym is found here. Do not break this logic.
     if (prefer_private_api && funcs->dlsym != NULL) {
         symbol = funcs->dlsym(handle, name, &dlsym);
     }
@@ -191,8 +148,6 @@ static bool resolve_linker_funcs(private_namespace_funcs *funcs, void *handle, p
 /**
  * @brief Fetches private API dlFunctions using various methods till we find all that we want.
  *
- *  - (aarch64 only) Using &dlopen, scan the assembly instructions until it finds the private API
- *  call and uses the pointers from there. This is likely to be libdl.so being scanned.\n
  *  - Public API dlopen & dlsym on libdl.so then libc.so\n
  *  - If private API dlopen is found try ld-android.so and libdl_android.so\n
  *  - If private API dlsym is found, try RTLD_DEFAULT\n
@@ -206,24 +161,7 @@ private_dl_funcs get_private_dl_functions()
     private_dl_funcs dlFuncs = {0};
     char *error;
     void* linkerHandle;
-    // First attempt the normal libadrenotools method (ARM64 shenanigans)
-#if (defined __aarch64__)
-    LOGI("Obtaining private API dlFuncs via BTI instruction from libdl.so");
-    dlFuncs.dlopen = find_branch_label(&dlopen);
-    dlFuncs.dlopen_ext = find_branch_label(&android_dlopen_ext);
-    dlFuncs.dlclose = find_branch_label(&dlclose);
-    dlFuncs.dlsym = find_branch_label(&dlsym);
-    if (dlFuncs.dlopen != NULL &&
-            dlFuncs.dlopen_ext != NULL &&
-            dlFuncs.dlclose != NULL &&
-            dlFuncs.dlsym != NULL) {
-        return dlFuncs;
-    }
-    LOGW("Obtaining dlFuncs via branch label instruction search failed, this is not supposed to happen on aarch64. Falling back.");
-    LOGI("Obtaining missing private API dlFuncs from libdl.so..");
-#else
-    LOGI("Obtaining private API dlFuncs using libdl.so..");
-#endif
+    LOGI("Obtaining private API dlFuncs from libdl.so..");
 
     // I don't know why this is allowed but ok
     linkerHandle = dlopen("libdl.so", RTLD_LAZY);
@@ -235,8 +173,7 @@ private_dl_funcs get_private_dl_functions()
     if (resolve_dl_funcs(&dlFuncs, linkerHandle, false)) return dlFuncs;
 
     // If somehow only dlopen was found try ld-android as it offers dlopen??? What the fuck
-    // This isn't even matching /system/lib64 anymore but whatever
-    // Probably something to do with loading /apex libs instead
+    // This works because the dlopen here is in the default namespace which has all the access
     // See https://cs.android.com/android/platform/superproject/+/android-latest-release:bionic/linker/linker.cpp;drc=ca1e7187c08ccba8da4b613d2b348fd7efa4e2b7;l=2176
     if (dlFuncs.dlopen != NULL) {
         LOGW("This is weird, somehow you have dlopen but are missing other dlFuncs. Obtaining missing private API funcs from ld-android.so..");
@@ -251,18 +188,18 @@ private_dl_funcs get_private_dl_functions()
 
     // Probably overkill, will probably never happen.
     if (dlFuncs.dlsym != NULL){
-        LOGW("This is very weird, somehow you have dlsym but are missing other dlFuncs. Obtaining missing private API funcs from RTLD_DEFAULT..");
+        LOGW("This is very weird, somehow you have dlsym but are missing dlopen. Obtaining missing private API funcs from RTLD_DEFAULT..");
         linkerHandle = RTLD_DEFAULT;
         if (resolve_dl_funcs(&dlFuncs, linkerHandle, true)) return dlFuncs;
     }
 
     LOGW("Obtaining dlFuncs via dlopen/dlsym failed, Obtaining missing private API funcs by memory scanning, this is unreliable.");
-    linkerHandle = nsbypass_dlopen(LINKER, 0); // NEVER dlsym this handle, SIGSEGV will murder you.
+    linkerHandle = xdl_open(LINKER, XDL_DEFAULT);
     if (!linkerHandle) return dlFuncs;
-    if (!dlFuncs.dlopen) dlFuncs.dlopen = nsbypass_dlsym(linkerHandle, "__loader_dlopen");
-    if (!dlFuncs.dlopen_ext) dlFuncs.dlopen_ext = nsbypass_dlsym(linkerHandle, "__loader_android_dlopen_ext");
-    if (!dlFuncs.dlclose) dlFuncs.dlclose = nsbypass_dlsym(linkerHandle, "__loader_dlclose");
-    if (!dlFuncs.dlsym) dlFuncs.dlsym = nsbypass_dlsym(linkerHandle, "__loader_dlsym");
+    if (!dlFuncs.dlopen) dlFuncs.dlopen = xdl_sym(linkerHandle, "__loader_dlopen", NULL);
+    if (!dlFuncs.dlopen_ext) dlFuncs.dlopen_ext = xdl_sym(linkerHandle, "__loader_android_dlopen_ext", NULL);
+    if (!dlFuncs.dlclose) dlFuncs.dlclose = xdl_sym(linkerHandle, "__loader_dlclose", NULL);
+    if (!dlFuncs.dlsym) dlFuncs.dlsym = xdl_sym(linkerHandle, "__loader_dlsym", NULL);
 
     return dlFuncs;
 }
@@ -433,11 +370,11 @@ private_namespace_funcs get_private_namespace_functions(
      */
 
     LOGW("Unable to load all namespace functions! dlFunction loading probably failed? Obtaining missing functions using memory scanning.");
-    linkerHandle = nsbypass_dlopen(LINKER, 0);
-    if (!linkerFuncs.create_namespace) linkerFuncs.create_namespace = nsbypass_dlsym(linkerHandle, "__loader_android_create_namespace");
-    if (!linkerFuncs.link_namespaces) linkerFuncs.link_namespaces = nsbypass_dlsym(linkerHandle, "__loader_android_link_namespaces");
-    if (!linkerFuncs.link_namespaces_all_libs) linkerFuncs.link_namespaces_all_libs = nsbypass_dlsym(linkerHandle, "__loader_android_link_namespaces_all_libs");
-    if (!linkerFuncs.get_exported_namespace) linkerFuncs.get_exported_namespace = nsbypass_dlsym(linkerHandle, "__loader_android_get_exported_namespace");
+    linkerHandle = xdl_open(LINKER, XDL_DEFAULT);
+    if (!linkerFuncs.create_namespace) linkerFuncs.create_namespace = xdl_sym(linkerHandle, "__loader_android_create_namespace", NULL);
+    if (!linkerFuncs.link_namespaces) linkerFuncs.link_namespaces = xdl_sym(linkerHandle, "__loader_android_link_namespaces", NULL);
+    if (!linkerFuncs.link_namespaces_all_libs) linkerFuncs.link_namespaces_all_libs = xdl_sym(linkerHandle, "__loader_android_link_namespaces_all_libs", NULL);
+    if (!linkerFuncs.get_exported_namespace) linkerFuncs.get_exported_namespace = xdl_sym(linkerHandle, "__loader_android_get_exported_namespace", NULL);
 
     return linkerFuncs;
 }
@@ -526,8 +463,9 @@ bool test_namespace_funcs(private_namespace_funcs nsFuncs)
 __attribute__((constructor)) static void resolve_global_symbols()
 {
     if (is_android_6_or_lower()){
+        // This is cause these namespace funcs don't exist there.
         LOGW("This library is not supposed to be used on sdk23 and lower. All APIs will remain "
-             "non-functional. nsbypass_dlfcn will redirect to the real public API.");
+             "non-functional.");
         return;
     }
     // NOTE: Tests are fast enough for release actually, but I'll disable them anyway.

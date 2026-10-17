@@ -124,7 +124,7 @@ bool private_link_namespaces_all_libs(
         struct android_namespace_t* to);
 
 /*
- * Some namespaces are
+ * Some exported namespaces are
  * "(default)" for g_default_namespace
  * "sphal" "vendor" "default" for vendor namespace, used in android_load_sphal_library
  *

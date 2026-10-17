@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.22.1)
 
 project("androidnsbypass")
 
+find_package(xdl REQUIRED CONFIG)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -15,13 +17,13 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         jni.c
         elf_soname_patcher.c
         nsbypass.c
-        nsbypass_dlfcn.c
         utils.c
         android_linker_ns.cpp
 )
 
 target_link_libraries(${CMAKE_PROJECT_NAME}
         log
+        xdl::xdl
 )
 
 target_include_directories(${CMAKE_PROJECT_NAME} PUBLIC
